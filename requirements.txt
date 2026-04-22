@@ -1,0 +1,5 @@
+boto3>=1.34
+pystray>=0.19
+Pillow>=10.0
+python-dotenv>=1.0
+pyperclip>=1.8
