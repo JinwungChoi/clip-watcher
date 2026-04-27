@@ -45,11 +45,12 @@ R2_PUBLIC_URL=https://pub-xxxxx.r2.dev
 
 ## 시작프로그램 등록
 
-`Win+R` → `shell:startup` → 다음 내용으로 `.bat` 또는 바로가기 생성:
+**자동** — 프로젝트 폴더의 `install-startup.bat` 더블클릭 → 끝. 다음 로그인부터 자동 실행됨.
+해제는 `uninstall-startup.bat`.
 
-```bat
-pythonw "C:\path\to\clip_watcher.py"
-```
+**수동** — `Win+R` → `shell:startup` → 열린 폴더에 `clip-watcher.bat`의 바로가기 생성.
+
+둘 다 `pythonw`로 실행되므로 콘솔 창은 안 뜨고 트레이 아이콘만 나타남.
 
 ## 요구사항
 
