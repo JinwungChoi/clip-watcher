@@ -13,6 +13,8 @@ from PIL import Image, ImageDraw, ImageGrab
 import pystray
 from pystray import Menu, MenuItem
 
+import customtkinter as ctk
+
 try:
     import pyperclip
 except ImportError:
@@ -72,6 +74,10 @@ class Logger:
     def __init__(self, log_file: Path):
         self.log_file = log_file
         self._lock = threading.Lock()
+        self._subscribers = []
+
+    def subscribe(self, fn) -> None:
+        self._subscribers.append(fn)
 
     def log(self, msg: str, level: str = "INFO") -> None:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -88,6 +94,11 @@ class Logger:
                     print(f"{color}{line}{_RESET}" if color else line, flush=True)
                 except (OSError, ValueError):
                     pass
+        for sub in self._subscribers:
+            try:
+                sub(line, level)
+            except Exception:
+                pass
 
 
 # ===== R2 Uploader =====
@@ -245,10 +256,168 @@ def _make_icon_image() -> Image.Image:
     return img
 
 
-class TrayApp:
+class MainWindow:
+    """Main UI window (CustomTkinter). Hides to tray on close."""
+
     def __init__(self, watcher: ClipWatcher, logger: Logger):
         self.watcher = watcher
         self.logger = logger
+        self.on_exit = lambda: None  # set by main()
+        self.on_state_change = lambda: None  # set by main() to refresh tray menu
+
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("green")
+
+        self.root = ctk.CTk()
+        self.root.title("Clip Watcher")
+        self.root.geometry("440x540")
+        self.root.minsize(380, 460)
+        self.root.protocol("WM_DELETE_WINDOW", self.hide)
+
+        self.status_label = ctk.CTkLabel(
+            self.root, text="● ON", font=("Segoe UI", 28, "bold"), text_color="#4ade80"
+        )
+        self.status_label.pack(pady=(20, 6))
+
+        self.toggle_btn = ctk.CTkButton(
+            self.root, text="일시정지", command=self._toggle, width=220, height=42,
+            font=("Segoe UI", 13, "bold"),
+        )
+        self.toggle_btn.pack(pady=(0, 18))
+
+        ctk.CTkLabel(self.root, text="경로 모드", anchor="w").pack(fill="x", padx=24)
+        self.mode_var = ctk.StringVar(value=watcher.path_mode)
+        self.mode_menu = ctk.CTkOptionMenu(
+            self.root,
+            values=self._available_modes(),
+            variable=self.mode_var,
+            command=self._on_mode_change,
+            width=220,
+        )
+        self.mode_menu.pack(pady=(2, 16), padx=24, anchor="w")
+
+        self.stats_label = ctk.CTkLabel(self.root, text="저장됨: 0개", anchor="w")
+        self.stats_label.pack(fill="x", padx=24)
+        self.last_label = ctk.CTkLabel(
+            self.root, text="마지막: -", anchor="w", wraplength=380, justify="left"
+        )
+        self.last_label.pack(fill="x", padx=24, pady=(0, 14))
+
+        ctk.CTkLabel(self.root, text="최근 로그", anchor="w").pack(fill="x", padx=24)
+        self.log_box = ctk.CTkTextbox(
+            self.root, height=160, font=("Consolas", 10), wrap="none"
+        )
+        self.log_box.pack(fill="both", expand=True, padx=24, pady=(4, 12))
+        self.log_box.configure(state="disabled")
+
+        btn_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=24, pady=(0, 16))
+        ctk.CTkButton(btn_frame, text="폴더 열기", command=self._open_folder, width=90).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(btn_frame, text="로그 열기", command=self._open_log, width=90).pack(side="left", padx=6)
+        ctk.CTkButton(
+            btn_frame, text="종료", command=self._exit, width=80,
+            fg_color="#a33", hover_color="#822",
+        ).pack(side="right")
+
+    def _available_modes(self):
+        return [m for m in PATH_MODES if m != "r2" or self.watcher.uploader.available]
+
+    def _toggle(self):
+        self.watcher.enabled = not self.watcher.enabled
+        if self.watcher.enabled:
+            self.logger.log("감시 재개", "OK")
+        else:
+            self.logger.log("감시 일시정지", "WARN")
+        self.refresh_state()
+        self.on_state_change()
+
+    def _on_mode_change(self, value: str):
+        if value == self.watcher.path_mode:
+            return
+        self.watcher.path_mode = value
+        save_path_mode(value)
+        self.logger.log(f"경로 모드 변경: {value} (저장됨)", "OK")
+        self.on_state_change()
+
+    def _open_folder(self):
+        try:
+            os.startfile(str(SAVE_DIR))
+        except OSError as e:
+            self.logger.log(f"폴더 열기 실패: {e}", "ERROR")
+
+    def _open_log(self):
+        try:
+            os.startfile(str(LOG_FILE))
+        except OSError as e:
+            self.logger.log(f"로그 열기 실패: {e}", "ERROR")
+
+    def _exit(self):
+        self.on_exit()
+
+    def show(self):
+        self.root.after(0, self._do_show)
+
+    def _do_show(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def hide(self):
+        self.root.withdraw()
+
+    def refresh_state(self):
+        self.root.after(0, self._do_refresh_state)
+
+    def _do_refresh_state(self):
+        on = self.watcher.enabled
+        self.status_label.configure(
+            text=f"{'●' if on else '○'} {'ON' if on else 'OFF'}",
+            text_color="#4ade80" if on else "#f87171",
+        )
+        self.toggle_btn.configure(text="일시정지" if on else "재개")
+        self.stats_label.configure(text=f"저장됨: {self.watcher.saved_count}개")
+        if self.mode_var.get() != self.watcher.path_mode:
+            self.mode_var.set(self.watcher.path_mode)
+
+    def update_last_save(self, filename: str, clip_value: str):
+        def _do():
+            self.last_label.configure(text=f"마지막: {filename}\n→ {clip_value}")
+            self._do_refresh_state()
+        self.root.after(0, _do)
+
+    def append_log(self, line: str, level: str):
+        def _do():
+            try:
+                self.log_box.configure(state="normal")
+                self.log_box.insert("end", line + "\n")
+                lines = int(self.log_box.index("end-1c").split(".")[0])
+                if lines > 200:
+                    self.log_box.delete("1.0", f"{lines - 200}.0")
+                self.log_box.see("end")
+                self.log_box.configure(state="disabled")
+            except Exception:
+                pass
+        try:
+            self.root.after(0, _do)
+        except Exception:
+            pass
+
+    def destroy(self):
+        try:
+            self.root.after(0, self.root.destroy)
+        except Exception:
+            pass
+
+    def run(self):
+        self.root.mainloop()
+
+
+class TrayApp:
+    def __init__(self, watcher: ClipWatcher, logger: Logger, window: MainWindow):
+        self.watcher = watcher
+        self.logger = logger
+        self.window = window
+        self.on_exit = lambda: None  # set by main()
         self.icon = pystray.Icon(
             "clip_watcher",
             _make_icon_image(),
@@ -272,10 +441,10 @@ class TrayApp:
         ]
 
         return Menu(
+            MenuItem("창 열기", self._show_window, default=True),
             MenuItem(
                 lambda item: "재개" if not self.watcher.enabled else "일시정지",
                 self._toggle,
-                default=True,
             ),
             MenuItem("저장 폴더 열기", self._open_folder),
             MenuItem(
@@ -287,6 +456,9 @@ class TrayApp:
             MenuItem("종료", self._exit),
         )
 
+    def _show_window(self, icon, item) -> None:
+        self.window.show()
+
     def _toggle(self, icon, item) -> None:
         self.watcher.enabled = not self.watcher.enabled
         state = "ON" if self.watcher.enabled else "OFF"
@@ -296,6 +468,16 @@ class TrayApp:
         else:
             self.logger.log("감시 일시정지", "WARN")
         self.icon.update_menu()
+        self.window.refresh_state()
+
+    def refresh(self) -> None:
+        """Called by window when it changes state — keep tray in sync."""
+        state = "ON" if self.watcher.enabled else "OFF"
+        try:
+            self.icon.title = f"Clip Watcher ({state})"
+            self.icon.update_menu()
+        except Exception:
+            pass
 
     def _make_set_mode(self, mode: str):
         def _set(icon, item):
@@ -303,6 +485,7 @@ class TrayApp:
             save_path_mode(mode)
             self.logger.log(f"경로 모드 변경: {mode} (저장됨)", "OK")
             self.icon.update_menu()
+            self.window.refresh_state()
         return _set
 
     def _open_folder(self, icon, item) -> None:
@@ -318,11 +501,9 @@ class TrayApp:
             self.logger.log(f"로그 열기 실패: {e}", "ERROR")
 
     def _exit(self, icon, item) -> None:
-        self.logger.log(f"종료 (총 {self.watcher.saved_count} 개 저장됨)", "OK")
-        self.watcher.stop()
-        self.icon.stop()
+        self.on_exit()
 
-    def on_save(self, filename: str, clip_value: str) -> None:
+    def notify_save(self, filename: str, clip_value: str) -> None:
         try:
             self.icon.notify(f"{filename}\n{clip_value}", "스샷 저장됨")
         except Exception:
@@ -402,24 +583,42 @@ def main() -> None:
     if initial_mode == "r2" and not uploader.available:
         logger.log(f"저장된 모드 'r2' 사용 불가 — '{DEFAULT_PATH_MODE}'로 fallback", "WARN")
         initial_mode = DEFAULT_PATH_MODE
-    watcher = ClipWatcher(logger, uploader, SAVE_DIR, initial_mode)
-    app = TrayApp(watcher, logger)
-    watcher.on_save = app.on_save
 
-    t = threading.Thread(target=watcher.run, daemon=True)
-    t.start()
+    watcher = ClipWatcher(logger, uploader, SAVE_DIR, initial_mode)
+    window = MainWindow(watcher, logger)
+    app = TrayApp(watcher, logger, window)
+
+    logger.subscribe(window.append_log)
+
+    def _on_save(filename, clip_value):
+        app.notify_save(filename, clip_value)
+        window.update_last_save(filename, clip_value)
+    watcher.on_save = _on_save
+
+    window.on_state_change = app.refresh
+
+    shutdown_done = threading.Event()
 
     def _shutdown():
-        logger.log(f"종료 신호 수신 (총 {watcher.saved_count} 개 저장됨)", "WARN")
+        if shutdown_done.is_set():
+            return
+        shutdown_done.set()
+        logger.log(f"종료 (총 {watcher.saved_count} 개 저장됨)", "OK")
         watcher.stop()
         try:
             app.icon.stop()
         except Exception:
             pass
+        window.destroy()
 
+    window.on_exit = _shutdown
+    app.on_exit = _shutdown
     _install_console_ctrl_handler(_shutdown)
 
-    app.run()
+    threading.Thread(target=watcher.run, daemon=True).start()
+    threading.Thread(target=app.run, daemon=True).start()
+
+    window.run()
 
 
 if __name__ == "__main__":
